@@ -1,27 +1,45 @@
+# BUSINESS SCIENCE LEARNING LABS ----
+# MODELTIME H2O WORKSHOP ----
+# **** ----
+
+# BUSINESS OBJECTIVE ----
+# - Forecast intermittent demand
+# - Predict next 52-WEEKS
+# **** ----
+
 # Run This:
 # remotes::install_github("business-science/modeltime.h2o")
 
 # LIBRARIES ----
 
-library(tidymodels)
-library(modeltime.h2o)
-library(timetk)
-library(tidyverse)
+library(tidymodels) # ML such as `Scikit-learn` in Python
+library(modeltime.h2o) # Auto ML
+library(tidyverse) # Core
+library(timetk) # TS analysis
+library(lubridate)
 
 # DATA ----
 
+# Actual Sales demand data from `timetk` package
+
 walmart_sales_weekly 
 
-data_tbl <- walmart_sales_weekly %>%
-    select(id, Date, Weekly_Sales)
+weekly_sales_tbl <- walmart_sales_weekly %>%
+    select(id, Date, Weekly_Sales) %>%
+    mutate(date = Date,
+           sales = Weekly_Sales) %>%
+    select(-c(Weekly_Sales, Date))
 
 # * Time Plot ----
-data_tbl %>%
+
+weekly_sales_tbl %>%
     group_by(id) %>%
+    
+    # From `timetk` package
     plot_time_series(
-        .date_var = Date,
-        .value = Weekly_Sales,
-        .facet_ncol = 2,
+        .date_var = date,
+        .value = sales,
+        .facet_ncol = 3,
         .smooth = T,
         .smooth_period = "2 quarters",
         .interactive = T
@@ -29,14 +47,14 @@ data_tbl %>%
 
 # * Seasonality Plot ----
 
-ids <- unique(data_tbl$id)
+ids <- unique(weekly_sales_tbl$id)
 
-data_tbl %>%
-    filter(id == ids[1]) %>%
+weekly_sales_tbl %>%
+    filter(id == ids[3]) %>%
     
     plot_seasonal_diagnostics(
-        .date_var = Date,
-        .value = log(Weekly_Sales)
+        .date_var = date,
+        .value = log(sales)
     )
 
 # TRAIN/TEST SPLITS ---
@@ -44,21 +62,24 @@ data_tbl %>%
 FORECAST_HORIZON <- 52 # no. of weeks
 
 splits <-  time_series_split(
-    data_tbl,
+    weekly_sales_tbl,
     assess = FORECAST_HORIZON,
     cumulative = T
 )
 
 splits %>%
     tk_time_series_cv_plan() %>%
-    plot_time_series_cv_plan(Date, Weekly_Sales)
+    plot_time_series_cv_plan(date, sales)
 
 # PREPROCESSING ----
 
-recipe_spec <- recipe(Weekly_Sales ~ ., data = training(splits)) %>%
-    step_timeseries_signature(Date) %>%
-    step_normalize(Date_index.num, starts_with("Date_year"))
+recipe_spec <- recipe(sales ~ ., data = training(splits)) %>%
+    
+    # Add engineered time calendar features
+    step_timeseries_signature(date) %>%
+    step_normalize(date_index.num, starts_with("date_year"))
 
+#
 recipe_spec %>% prep() %>% juice() %>% glimpse()
 
 # MODELING ----
@@ -71,18 +92,18 @@ h2o.init(
 )
 
 # Optional (Turn off progress)
-h2o.no_progress()
+# h2o.no_progress()
 
 # * Model Specification ----
 
-model_spec_h2o <- automl_reg(mode  = 'regression') %>%
+model_spec_h2o <- automl_reg(mode  = 'regression') %>% # AutoML specification
     set_engine(
         engine                     = 'h2o',
         max_runtime_secs           = 30,
         max_runtime_secs_per_model = 10,
         max_models                 = 30,
         nfolds                     = 5,
-        exclude_algos              =c("DeepLearning"),
+        exclude_algos              =c("DeepLearning"), # Exclude DL models
         verbosity                  = NULL,
         seed                       = 786
     )
@@ -92,7 +113,7 @@ model_spec_h2o
 # * Fitting ----
 #  - This step will take some time depending on your model Specification selections
 
-wflw_fit_h2o <- workflow() %>%
+wflw_fit_h2o <- workflow() %>% # create workflow from `tidymodels` ecosystem
     add_model(model_spec_h2o) %>%
     add_recipe(recipe_spec) %>%
     fit(training(splits))
@@ -108,11 +129,13 @@ wflw_fit_h2o %>% automl_leaderboard()
 # * Saving /Loading Models ----
 
 wflw_fit_h2o %>%
-    automl_update_model('GBM_grid_1_AutoML_1_20230626_103551_model_18') %>%
-    save_h2o_model(path = 'h2o_models/GBM_grid_1_AutoML_1_20230626_103551_model_18')
+    
+    # Update by picking another model from the leader board
+    automl_update_model('GBM_grid_1_AutoML_16_20230626_160412_model_18') %>%
+    save_h2o_model(path = 'h2o_models/GBM_grid_1_AutoML_16_20230626_160412_model_18')
 
 
-load_h2o_model('h2o_models/GBM_grid_1_AutoML_1_20230626_103551_model_18/')
+load_h2o_model('h2o_models/GBM_grid_1_AutoML_16_20230626_160412_model_18/')
 
 # FORECASTING ----
 
@@ -121,53 +144,56 @@ load_h2o_model('h2o_models/GBM_grid_1_AutoML_1_20230626_103551_model_18/')
 modeltime_tbl <- modeltime_table(
     wflw_fit_h2o,
     wflw_fit_h2o %>%
-        automl_update_model('GBM_grid_1_AutoML_1_20230626_103551_model_18')
+        automl_update_model('GBM_grid_1_AutoML_16_20230626_160412_model_18')
 )
 
 modeltime_tbl
 
 # * Calibrate ----
+# - Is actually a Residual Analysis
 
 calibration_tbl <- modeltime_tbl %>%
     modeltime_calibrate(testing(splits))
 
-calibration_tbl %>% modeltime_accuracy() %>% table_modeltime_accuracy()
+calibration_tbl %>% 
+    modeltime_accuracy() %>% 
+    table_modeltime_accuracy()
 
 # * Forecasting ----
 
 calibration_tbl %>%
     modeltime_forecast(
         new_data = testing(splits),
-        actual_data = data_tbl,
+        actual_data = weekly_sales_tbl,
         keep_data = T
     ) %>%
     group_by(id) %>%
     plot_modeltime_forecast(
-        .facet_ncol = 2,
+        .facet_ncol = 3,
         .interactive = T
     )
 
 # * Refitting ----
 
 refit_tbl <- calibration_tbl%>%
-    modeltime_refit(data_tbl)
+    modeltime_refit(weekly_sales_tbl)
 
 # * Future Forecast ----
 
 future_tbl <- testing(splits) %>%
     group_by(id) %>%
-    future_frame(Date, .length_out = 52) %>%
+    future_frame(date, .length_out = 52) %>%
     ungroup()
 
 refit_tbl %>%
     modeltime_forecast(
         new_data = future_tbl,
-        actual_data = data_tbl,
+        actual_data = weekly_sales_tbl,
         keep_data = T
     ) %>%
     group_by(id) %>%
     plot_modeltime_forecast(
-        .facet_ncol = 2,
+        .facet_ncol = 3,
         .interactive = T
     )
 
